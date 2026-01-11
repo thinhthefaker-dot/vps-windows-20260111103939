@@ -1,0 +1,68 @@
+name: Windows VPS with VNC
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows-vps:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    
+    steps:
+      - name: Setup VNC Server
+        shell: powershell
+        run: |
+          Write-Host "Installing TightVNC Server..."
+          $url = "https://www.tightvnc.com/download/2.8.84/tightvnc-2.8.84-gpl-setup-64bit.msi"
+          $output = "$env:TEMP\tightvnc-setup.msi"
+          Invoke-WebRequest -Uri $url -OutFile $output
+          Start-Process msiexec.exe -Wait -ArgumentList "/i $output /quiet /norestart ADDLOCAL=Server SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=memaybeo SET_VIEWONLYPASSWORD=1 VALUE_OF_VIEWONLYPASSWORD=viewonly"
+          
+          Write-Host "Starting VNC Server..."
+          Start-Service tvnserver
+          
+          Write-Host "Configuring Windows Firewall..."
+          New-NetFirewallRule -DisplayName "VNC Server" -Direction Inbound -Protocol TCP -LocalPort 5900 -Action Allow
+      
+      - name: Setup Cloudflared Tunnel
+        shell: powershell
+        run: |
+          Write-Host "Downloading Cloudflared..."
+          $url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          $output = "$env:TEMP\cloudflared.exe"
+          Invoke-WebRequest -Uri $url -OutFile $output
+          
+          Write-Host "Starting tunnel on port 5900..."
+          Start-Process -FilePath $output -ArgumentList "tunnel", "--url", "tcp://localhost:5900" -RedirectStandardOutput "$env:TEMP\tunnel-output.txt" -NoNewWindow
+          
+          Start-Sleep -Seconds 10
+          
+          Write-Host "Reading tunnel URL..."
+          $output_content = Get-Content "$env:TEMP\tunnel-output.txt" -Raw
+          Write-Host "Tunnel Output:"
+          Write-Host $output_content
+          
+          if ($output_content -match 'https://[^\s]+\.trycloudflare\.com') {
+            $tunnel_url = $matches[0]
+            Write-Host "::set-output name=tunnel_url::$tunnel_url"
+            Write-Host "VNC_TUNNEL_URL=$tunnel_url" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            Write-Host "Tunnel URL: $tunnel_url"
+          } else {
+            Write-Host "ERROR: Could not extract tunnel URL"
+          }
+      
+      - name: Keep Alive
+        shell: powershell
+        run: |
+          Write-Host "VPS is ready! VNC URL: $env:VNC_TUNNEL_URL"
+          Write-Host "VNC Password: memaybeo"
+          Write-Host "Keeping alive for 6 hours..."
+          
+          $endTime = (Get-Date).AddHours(6)
+          while ((Get-Date) -lt $endTime) {
+            $remaining = $endTime - (Get-Date)
+            Write-Host "Time remaining: $($remaining.Hours)h $($remaining.Minutes)m $($remaining.Seconds)s"
+            Start-Sleep -Seconds 300
+          }
+          
+          Write-Host "6 hours elapsed. Shutting down..."
